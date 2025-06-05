@@ -38,9 +38,6 @@ for st in stations:
     stationMask = stations == st
     dict[st] = {}
     
-    totalEnergy = 0
-    totalTime = 0
-    numDoms = 0
     for dom in niceDoms[stationMask]:
         domMask = niceDoms == dom
         mask = np.logical_and(domMask, stationMask)
@@ -48,10 +45,10 @@ for st in stations:
                          'relEnergy':relEnergy[mask][0],
                          'time':zeroTime[mask][0],
                          'relTime':relTime[mask][0]}
-        totalEnergy += relEnergy[mask][0]
-        totalTime += relTime[mask][0]
-        numDoms += 1
-    dict[st]['avgTime'] = totalEnergy / numDoms
+        if(dom - 2 <= 0): #tank A
+            
+        else:             #tank B
+    dict[st]['avgTimeTankA'] = totalEnergy / numDoms
         
     
         
