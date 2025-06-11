@@ -1,9 +1,9 @@
 import numpy as np
-import RPi.GPIO as gp
+import RPi_GPIO_Helper as gp
 
 
 
-#data = np.loadtxt("./data/" + input("name of file"))
+#data = np.load("./data/" + input("name of file"))
 data = np.loadtxt("./data/12362_000030_5.txt")
 # STATION DOM CHARGE TIME
 # 1 nested array = a row
@@ -45,10 +45,11 @@ for st in stations:
                          'relEnergy':relEnergy[mask][0],
                          'time':zeroTime[mask][0],
                          'relTime':relTime[mask][0]}
-        if(dom - 2 <= 0): #tank A
-            
+        if dom - 2 <= 0: #tank A
+            print('A')
         else:             #tank B
-    dict[st]['avgTimeTankA'] = totalEnergy / numDoms
+            print('B')
+    # dict[st]['avgTimeTankA'] = totalEnergy / numDoms
         
     
         
