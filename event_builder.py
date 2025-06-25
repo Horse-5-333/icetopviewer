@@ -1,165 +1,154 @@
 import numpy as np
 import time
-import RPi.GPIO as gp
 import pigpio
 from tkinter.filedialog import askopenfilename
 from tkinter import Tk
 
-gp.setwarnings(False)
+# Initialize pigpio
+pi = pigpio.pi()
+if not pi.connected:
+    raise IOError("Could not connect to pigpio daemon")
 
-def get_frame_index(current_time: np.float32):
-    return np.searchsorted(avg_time, current_time, "right")
-
-def wait_until(final: np.float32):
-    now = time.perf_counter()
-    while now < final:
-        now = time.perf_counter()
-    return
-
-
-
-finished = False
-
-############## DATA READING AND SANITIZATION ###############
-
-# data = np.loadtxt("./data/12362_000030_6.txt")
-
+# ==================== Data Loading ====================
 Tk().withdraw()
 data = np.loadtxt(askopenfilename())
 pin_clock_table = np.loadtxt("81_pin_table.txt")
 clock_bits = np.loadtxt("clock_bits.txt").astype(int)
 
-time_scale = float(input("how long do you want this to take?(in seconds) \n"))
-clock_freq = 6000
-cycle_period = 1 / clock_freq
+# User input: total simulation duration (seconds)
+time_scale = float(input("Simulation duration (seconds): "))
+clock_freq = 300  # desired full-frame refresh rate (Hz)
+cycle_period = 1.0 / clock_freq
 
-# Normalize raw data
-stations = data[:, 0]
+# ================= Normalize and Average Data ================
+# Raw columns: station, dom, energy, timestamp
+stations_raw = data[:, 0]
 doms = data[:, 1] - 60
-energy = data[:, 2] / np.max(data[:, 2])
-times = (data[:, 3] - np.min(data[:, 3])) / np.max(data[:, 3] - np.min(data[:, 3]))
+energy_raw = data[:, 2]
+time_raw = data[:, 3]
 
-# Compute average time and energy per station
+# Normalize energy (0-1) and time (0-1)
+energy_norm = energy_raw / np.max(energy_raw)
+time_norm = (time_raw - np.min(time_raw)) / np.ptp(time_raw)
+
+# Compute per-station averages
+unique_stations = np.unique(stations_raw)
 avg_time = []
 avg_energy = []
-for st in np.unique(stations):
-    station_mask = stations == st
-    avg_time.append(np.mean(times[station_mask]))
-    avg_energy.append(np.mean(energy[station_mask]))
-
-stations = np.unique(stations)
+for st in unique_stations:
+    mask = stations_raw == st
+    avg_time.append(np.mean(time_norm[mask]))
+    avg_energy.append(np.mean(energy_norm[mask]))
 avg_time = np.array(avg_time)
 avg_energy = np.array(avg_energy)
 
-# Sort all arrays by time
-time_key = np.argsort(avg_time)
-avg_time = avg_time[time_key]
-stations = stations[time_key]
-avg_energy = avg_energy[time_key]
+# Sort by avg_time
+order = np.argsort(avg_time)
+avg_time = avg_time[order]
+stations = unique_stations[order]
+avg_energy = avg_energy[order]
 
-# Create dictionary of per-station readings
-station_readings = {}
-for i in range(len(stations)):
-    station_readings[stations[i]] = {"energy": avg_energy[i], "time": avg_time[i]}
+# Build energy lookup: [pin group][channel][frame]
+frames = len(stations) + 1
+rows = pin_clock_table.shape[0]
+energy_array = np.zeros((rows, 8, frames), np.float32)
+for i, st in enumerate(stations, start=1):
+    energy_array[:, :, i] = energy_array[:, :, i - 1]
+    x, y = np.argwhere(pin_clock_table == st)[0]
+    energy_array[x, y, i] = avg_energy[order[i - 1]]
+energy_array[:, :, 0] = 0  # initial blank frame
 
-###################### PINS AND SETUP ########################
+# ================= GPIO Setup =================
+clock_pins = [17, 27, 22]  # demux select pins (BCM)
+data_pins = [4, 26, 3, 10, 9, 11, 5, 6, 13, 19, 14, 15, 18, 23]
+# PWM resolution period (microseconds) for each channel
+pwm_period_us = int(1e6 / (clock_freq * 8))  # divide period across 8 channel pulses
 
-clock_pins = [17, 27, 22] # GPIO17, 27, 22
-data_pins = [4,26,3,10,9,11,5,6,13,19,14,15,18,23,24,25,8,1,12,16,20,21]
-# 14 data pins × 8 channels = 112 addressable LEDs
-# We can use more
-
-########## WRITE LOOKUP TABLE ########
-
-# 3D array: [pin group][channel][frame]
-energy_array = np.zeros((pin_clock_table.shape[0], 8, stations.shape[0] + 1), np.float32)
-
-for i, st in enumerate(stations):
-    energy_array[:, :, i] = energy_array[:, :, i - 1]  # carry forward previous frame
-    x, y = np.argwhere(pin_clock_table == st)[0]  # locate station in pin table
-    energy_array[x, y, i] = avg_energy[i] * 255
-    # set brightness for current station change, as only 1 station changes per frame
-    
-energy_array[:, :, -1] = energy_array[:, :, -2]
-
-
-# cache saved array to skip generation if exists
-# np.save("./data/energy_array_12362_000030_5.npy", energy_array)
-
-############# SIMULATION RUN ##########
-# gp.setmode(gp.BCM)
-pi = pigpio.pi()
-# gp.setup(clock_pins, gp.OUT)
-for pin in clock_pins:
+for pin in clock_pins + data_pins:
     pi.set_mode(pin, pigpio.OUTPUT)
 
-used_pins_num = data_pins[:11]
-data_pwm_pins = []
-# gp.setup(used_pins_num, gp.OUT)
-for pin in used_pins_num:
-    # pwm = gp.PWM(pin, 3000)
-    pi.set_PWM_frequency(pin, 3000)
-    # data_pwm_pins.append(pwm)
-    # pwm.start(0)
-    
+# ================= Helper Functions =================
+def get_frame_index(t_norm: float) -> int:
+    """
+    Return frame index for normalized time t_norm (0-1).
+    """
+    return int(np.searchsorted(avg_time, t_norm, side='right'))
 
+
+def wait_until(target: float):
+    """
+    Busy-wait until time.perf_counter() reaches target.
+    """
+    while time.perf_counter() < target:
+        pass
+
+
+def build_full_mux_wave(frame_idx: int) -> list:
+    """
+    Build pigpio.pulse list that sequentially pulses all 8 channels
+    with duty cycles from energy_array[..., frame_idx].
+    """
+    pulses = []
+    for channel in range(8):
+        # Extract brightness levels for this channel
+        levels = energy_array[:, channel, frame_idx]
+        # Calculate on/off durations per pin
+        on_times = (levels * pwm_period_us).astype(int)
+        off_times = pwm_period_us - on_times
+
+        # Create pulses for data pins
+        mask_on = 0
+        mask_off = 0
+        for pin, on_t in zip(data_pins, on_times):
+            if on_t > 0:
+                mask_on |= (1 << pin)
+            if on_t < pwm_period_us:
+                mask_off |= (1 << pin)
+        # Add on/off pulses for this channel period
+        pulses.append(pigpio.pulse(mask_on, 0, np.max(on_times)))
+        pulses.append(pigpio.pulse(0, mask_on, pwm_period_us - np.max(on_times)))
+
+        # Set demux lines for next channel
+        clk_bits = clock_bits[channel]
+        clk_on = sum((1 << p) for p, b in zip(clock_pins, clk_bits) if b)
+        clk_off = sum((1 << p) for p, b in zip(clock_pins, clk_bits) if not b)
+        pulses.append(pigpio.pulse(clk_on, clk_off, 50))  # short latch pulse
+
+    return pulses
+
+# ================= Main Loop =================
 step = 0
-total_steps = clock_freq * time_scale
-output_levels = np.zeros(len(data_pins), np.float32)
-
-print("startin!")
-
-#neccesary to keep in synch with PWM
-print("Press CTRL+C to terminate.")
+total_steps = int(clock_freq * time_scale)
 next_time = time.perf_counter() + cycle_period
-debug_expected_finish = time.perf_counter() + time_scale
-debug_start_time = time.perf_counter()
+
 try:
     while step <= total_steps:
-        # debug_time_elapsed = time.perf_counter()
-        channel = int(step % 8)
-        frame = get_frame_index(step / total_steps)
-        output_levels = energy_array[:, channel, frame]
-        
-        for i, pin in enumerate(used_pins_num):
-            pi.set_PWM_dutycycle(pin, 0)
-            
-        
-        # waits for a proportion of the cycle to prevent overlap
-        wait_until(time.perf_counter() + (cycle_period/10))
-        
-        # this is the clock going to the pins
-        for i, pin in enumerate(clock_pins):
-            pi.write(pin, clock_bits[channel, i])
-        
-        for i, pin in enumerate(used_pins_num):
-            pi.set_PWM_dutycycle(pin, output_levels[i])
-            
-        
+        # Determine current frame based on normalized time progress
+        t_norm = step / total_steps
+        frame = get_frame_index(t_norm)
+
+        # Build and send waveform for full 8-channel refresh
+        pi.wave_clear()
+        wave = build_full_mux_wave(frame)
+        pi.wave_add_generic(wave)
+
+        wid = pi.wave_create()
+        if wid >= 0:
+            pi.wave_send_once(wid)
+            # Wait until wave is done
+            while pi.wave_tx_busy():
+                pass
+            pi.wave_delete(wid)
+
+        # Sync to next frame time
         wait_until(next_time)
         next_time += cycle_period
-        
-        # CLOCK DEBUG #
-        #clock = [pi.read(clock_pins[0]), pi.read(clock_pins[1]), pi.read(clock_pins[2])]
-        #print(clock)
-        
         step += 1
-        
-#        if finished == False:
-#            if step / total_steps > 1:
-#                print("program done use keboard inturupt. ")
-#                finished = True
-                
-        # debug_time_elapsed = time.perf_counter() - debug_time_elapsed
-        # print("expected " + str(cycle_period * 1000) + "ms, got " + str(debug_time_elapsed * 1000))
-        
+
 except KeyboardInterrupt:
     pass
 
-print("Took " + str(round(((time.perf_counter() - (cycle_period) - debug_start_time) - time_scale) * 1000, 2)) +
-      "ms (" + str(round(((time.perf_counter() - (cycle_period) - debug_start_time) - time_scale)*100 /(time_scale), 2)) +
-      "%) longer than expected. Avg " + str(round((time.perf_counter() - (cycle_period) - debug_start_time)*1000/total_steps, 2)) +
-      "ms per cycle, expected " + str(round(cycle_period*1000, 2)) + "ms to keep time.")
-
-for i, pin in enumerate(used_pins_num):
-    pi.set_PWM_dutycycle(pin, 0)
+# Cleanup: turn off all outputs
+for pin in data_pins + clock_pins:
+    pi.write(pin, 0)
+pi.stop()
