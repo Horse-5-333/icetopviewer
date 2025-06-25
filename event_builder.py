@@ -16,8 +16,9 @@ pin_clock_table = np.loadtxt("81_pin_table.txt")
 clock_bits = np.loadtxt("clock_bits.txt").astype(int)
 
 # User input: total simulation duration (seconds)
-time_scale = float(input("Simulation duration (seconds): "))
-clock_freq = 300  # desired full-frame refresh rate (Hz)
+user_time_scale = float(input("Simulation duration (seconds): "))
+time_scale_adjusted = user_time_scale * 0.675
+clock_freq = 256  # desired full-frame refresh rate (Hz)
 cycle_period = 1.0 / clock_freq
 
 # ================= Normalize and Average Data ================
@@ -118,8 +119,12 @@ def build_full_mux_wave(frame_idx: int) -> list:
 
 # ================= Main Loop =================
 step = 0
-total_steps = int(clock_freq * time_scale)
+total_steps = int(clock_freq * time_scale_adjusted)
+cycle_period = time_scale_adjusted / total_steps
 next_time = time.perf_counter() + cycle_period
+
+debug_start_time = time.perf_counter()
+debug_missed_cycles = 0
 
 try:
     while step <= total_steps:
@@ -139,14 +144,36 @@ try:
             while pi.wave_tx_busy():
                 pass
             pi.wave_delete(wid)
+            
+        step += 1
+        now = time.perf_counter()
+        if now > next_time:
+            debug_missed_cycles += 1
+            next_time += cycle_period
+            continue
 
-        # Sync to next frame time
+        # wait until the next step time - almost never happpens, as the system consistently
+        # runs over cycle deadline (but still looks smooth)
         wait_until(next_time)
         next_time += cycle_period
-        step += 1
+        
 
 except KeyboardInterrupt:
     pass
+
+actual_duration = time.perf_counter() - debug_start_time
+expected_duration = user_time_scale
+extra_time_ms = round((actual_duration - expected_duration) * 1000, 3)
+extra_time_pct = round((actual_duration - expected_duration) * 100 / expected_duration, 3)
+avg_cycle_time_ms = round((actual_duration * 1000) / total_steps, 3)
+expected_cycle_time_ms = round((expected_duration * 1000) / total_steps, 3)
+missed_pct = round(debug_missed_cycles * 100 / total_steps, 3)
+
+print(
+    f"Took {extra_time_ms}ms ({extra_time_pct}%) longer than expected. "
+    f"Avg {avg_cycle_time_ms}ms per cycle, expected {expected_cycle_time_ms}ms to keep time. "
+    f"{debug_missed_cycles}/{int(total_steps)} ({missed_pct}%) missed cycles."
+)
 
 # Cleanup: turn off all outputs
 for pin in data_pins + clock_pins:
