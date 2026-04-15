@@ -58,4 +58,4 @@ Animating a 16-LED test array with pre-recorded IceTop event data.
 
 ### 5. Assembly and Housing
 Moving the circuitry to permanent breadboards and preparing the custom housing for the South Pole station array.
-![Breadboards with housing](.photos/5-breadboards_with_housing.jpeg)
+![Breadboards with housing](./photos/5-breadboards_with_housing.jpeg)
